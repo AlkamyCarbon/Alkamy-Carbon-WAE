@@ -1,13 +1,13 @@
 {
   "projects": {
-    "default": "dashboard-ac-92912",
-    ".": "dashboard-ac-92912"
+    "default": "xx",
+    ".": "xx"
   },
   "targets": {
-    "dashboard-ac-92912": {
+    "xx": {
       "hosting": {
-        "alkamy": [
-          "dashboard-alkamycarbon"
+        "xx": [
+          "xx"
         ]
       }
     }
