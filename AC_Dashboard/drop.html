@@ -1,0 +1,96 @@
+<div class="container-fluid p-0">
+
+  <!-- Top Bar -->
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <div>
+      <h1 class="h3 mb-1">Drop Entry</h1>
+      <p class="text-muted mb-0">
+        Capture delivery confirmation and drop location evidence.
+      </p>
+    </div>
+
+    <button class="btn btn-outline-secondary"
+            onclick="loadPage('LSD.html')">
+      ← Discard
+    </button>
+  </div>
+
+  <!-- Form Card -->
+  <div class="card">
+    <div class="card-body">
+
+      <form id="dropForm" class="row g-4 ops-form">
+
+        <!-- =========================
+             DROP CONFIRMATION
+        ========================== -->
+        <div class="col-12">
+          <h6 class="section-header">Drop Confirmation</h6>
+        </div>
+
+<!-- Drop Site -->
+<div class="col-md-6 mt-2">
+  <label for="dropSite" class="form-label">
+    Drop Site
+  </label>
+  <select id="dropSite"
+          class="form-control"
+          required>
+    <option value="">Select Drop Location</option>
+    <option>Vashi STP</option>
+    <option>Nerul STP</option>
+    <option>Colaba STP</option>
+  </select>
+</div>
+
+        <!-- Drop Photo -->
+        <div class="col-md-6 mt-2">
+          <label for="dropPhoto" class="form-label">
+            Drop Photo Evidence
+          </label>
+          <input type="file"
+                 id="dropPhoto"
+                 class="form-control"
+                 accept="image/*"
+                 capture>
+        </div>
+
+        <!-- Location Capture -->
+        <div class="col-md-6 mt-4 d-flex flex-column justify-content-end">
+          <button type="button"
+                  class="btn btn-outline-primary"
+                  onclick="getDropLocation()">
+            Capture Drop Location
+          </button>
+
+          <small id="dropLoc"
+                 class="text-success fw-semibold mt-2 d-block">
+          </small>
+        </div>
+
+        <!-- Progress -->
+        <div class="col-12 mt-3">
+          <div class="progress" style="height: 6px;">
+            <div id="dropProgress"
+                 class="progress-bar"
+                 role="progressbar"
+                 style="width: 0%;">
+            </div>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <div class="col-12 text-end mt-4">
+          <button type="submit"
+                  id="dropSubmitBtn"
+                  class="btn btn-primary px-5 fw-semibold">
+            Save Drop
+          </button>
+        </div>
+
+      </form>
+
+    </div>
+  </div>
+
+</div>

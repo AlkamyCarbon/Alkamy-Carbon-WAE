@@ -1,0 +1,16 @@
+{
+  "projects": {
+    "default": "dashboard-ac-92912",
+    ".": "dashboard-ac-92912"
+  },
+  "targets": {
+    "dashboard-ac-92912": {
+      "hosting": {
+        "alkamy": [
+          "dashboard-alkamycarbon"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
