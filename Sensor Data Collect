@@ -1,0 +1,536 @@
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h>
+#include <HardwareSerial.h>
+#include "time.h"
+#include <esp_task_wdt.h>
+
+// ============================================================
+//  WIFI CONFIG
+// ============================================================
+#define WIFI_SSID     "xxxx"
+#define WIFI_PASSWORD "xxxx"
+
+// ============================================================
+//  FIREBASE CONFIG
+// ============================================================
+#define API_KEY      "xxxxx"
+#define DATABASE_URL "xxxxx"
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+// ============================================================
+//  TIME CONFIG
+// ============================================================
+const char* ntpServer = "pool.ntp.org";
+bool timeSynced = false;
+bool firebaseOk = false;
+
+// ============================================================
+//  WATCHDOG
+// ============================================================
+#define WDT_TIMEOUT_SECONDS 180
+
+// ============================================================
+//  pH SENSOR (GPIO 34)
+// ============================================================
+const int   PH_PIN     = 34;
+const float CAL_pH_1   = 4.0f,  CAL_mV_1  = 1886.0f;
+const float CAL_pH_2   = 7.0f,  CAL_mV_2  = 1361.0f;
+const float CAL_TEMP_C = 28.0f;
+const float REF_TEMP_C = 25.0f;
+float adjMv1, adjMv2;
+
+// ============================================================
+//  RS485 — shared bus
+// ============================================================
+HardwareSerial RS485(2);
+#define RXD2  16
+#define TXD2  17
+#define DE_RE  4
+
+// EC sensor — slave 0x01
+uint8_t ecRequest[]  = { 0x01, 0x03, 0x00, 0x00, 0x00, 0x04, 0x44, 0x09 };
+uint8_t ecResponse[13];
+
+// DO sensor — slave 0x02 — read DO sat%, DO mg/L, Temp (6 registers, 3 floats)
+uint8_t doRequest[] = { 0x02, 0x03, 0x00, 0x00, 0x00, 0x06, 0xC5, 0xFB };
+uint8_t doResponse[17];
+
+// ============================================================
+//  SAMPLING CONFIG
+// ============================================================
+const unsigned long SAMPLE_INTERVAL = 5000;   // 5s per sample
+const int           NUM_SAMPLES     = 12;     // 12 × 5s = 60s window
+const int           STABLE_START    = 7;      // last 5 of 12 for EC/DO stability
+const int           STABLE_COUNT    = 5;
+
+unsigned long lastSample = 0;
+int           sampleIndex = 0;
+
+// pH — full 12 samples
+float phRawSamples[NUM_SAMPLES];
+float phCorSamples[NUM_SAMPLES];
+float mvSamples[NUM_SAMPLES];
+
+// EC — full 12 stored, median of last 5 used
+float ecSamples[NUM_SAMPLES];
+float ecTempSamples[NUM_SAMPLES];
+float salSamples[NUM_SAMPLES];
+float tdsSamples[NUM_SAMPLES];
+
+// DO — full 12 stored, median of last 5 used
+float doSatSamples[NUM_SAMPLES];
+float doMgSamples[NUM_SAMPLES];
+float doTempSamples[NUM_SAMPLES];
+
+// ============================================================
+//  CIRCULAR BUFFER
+// ============================================================
+#define BUFFER_SIZE 150
+
+struct DataPoint {
+  time_t epoch;
+  float phRaw, phCor, mv;
+  float ec, ecTemp, sal, tds;
+  bool  ecValid;
+  float doSat, doMg, doTemp;
+  bool  doValid;
+};
+
+DataPoint buffer[BUFFER_SIZE];
+int bufferStart = 0;
+int bufferCount = 0;
+
+// ============================================================
+//  DO CONFIG WRITTEN AT BOOT
+// ============================================================
+#define ATM_PRESSURE_HPA  1004.0f   // your local pressure in hPa
+// Salinity written each 2-min cycle from EC reading
+
+// ============================================================
+//  WIFI STATE
+// ============================================================
+unsigned long lastWiFiRetry   = 0;
+unsigned long wifiLostTime    = 0;
+unsigned long lastNetworkScan = 0;
+const unsigned long WIFI_RETRY_INTERVAL = 20000;
+const unsigned long SCAN_INTERVAL       = 60000;
+
+// ============================================================
+//  HELPERS
+// ============================================================
+void scanNetworks() {
+  Serial.println("[WiFi] Scanning for networks...");
+  int n = WiFi.scanNetworks();
+  if (n == 0) { Serial.println("[WiFi] No networks found"); }
+  else {
+    Serial.printf("[WiFi] %d networks found:\n", n);
+    for (int i = 0; i < n; i++)
+      Serial.printf("  %d: %s (RSSI %d)\n", i+1, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+  }
+  Serial.printf("[WiFi] Looking for: \"%s\"\n", WIFI_SSID);
+}
+
+void manageNetwork() {
+  unsigned long now = millis();
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiLostTime = 0;
+    if (!timeSynced) {
+      configTime(19800, 0, ntpServer);
+      timeSynced = true;
+      Serial.printf("[WiFi] Connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    }
+    if (!firebaseOk) {
+      Serial.println("[Firebase] Initialising...");
+      config.api_key      = API_KEY;
+      config.database_url = DATABASE_URL;
+      config.max_token_generation_retry = 3;
+      config.timeout.socketConnection   = 5000;
+      config.timeout.wifiReconnect      = 5000;
+      config.timeout.serverResponse     = 5000;
+      Firebase.signUp(&config, &auth, "", "");
+      Firebase.begin(&config, &auth);
+      Firebase.reconnectWiFi(true);
+      firebaseOk = true;
+      esp_task_wdt_reset();
+      Serial.println("[Firebase] Ready");
+    }
+    return;
+  }
+  timeSynced = false;
+  firebaseOk = false;
+  if (wifiLostTime == 0) wifiLostTime = now;
+  if (now - lastNetworkScan >= SCAN_INTERVAL) {
+    lastNetworkScan = now;
+    WiFi.disconnect(true); delay(200);
+    scanNetworks();
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+  if (now - lastWiFiRetry < WIFI_RETRY_INTERVAL) return;
+  lastWiFiRetry = now;
+  long downSec = (now - wifiLostTime) / 1000;
+  if (downSec < 180) {
+    Serial.printf("[WiFi] Down %lds — soft reconnect\n", downSec);
+    WiFi.reconnect();
+  } else {
+    Serial.println("[WiFi] Down >3 min — hard reset");
+    WiFi.disconnect(); delay(100);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+}
+
+float computeRawPH(float mV) {
+  float slope = (CAL_pH_2 - CAL_pH_1) / (adjMv2 - adjMv1);
+  return CAL_pH_1 + slope * (mV - adjMv1);
+}
+
+float temperatureCorrectPH(float phRaw, float tempC) {
+  float T_ref = REF_TEMP_C + 273.15f;
+  float T_now = tempC      + 273.15f;
+  return 7.0f + (phRaw - 7.0f) * (T_ref / T_now);
+}
+
+float median(float *arr, int n) {
+  float t[n];
+  memcpy(t, arr, n * sizeof(float));
+  for (int i = 0; i < n-1; i++)
+    for (int j = i+1; j < n; j++)
+      if (t[j] < t[i]) { float x = t[i]; t[i] = t[j]; t[j] = x; }
+  return t[n/2];
+}
+
+// IEEE 754 big-endian bytes to float
+float bytesToFloat(uint8_t *b) {
+  uint32_t u = ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+               ((uint32_t)b[2] << 8)  |  (uint32_t)b[3];
+  float f; memcpy(&f, &u, 4);
+  return f;
+}
+
+// CRC16 Modbus
+uint16_t crc16(uint8_t *buf, int len) {
+  uint16_t crc = 0xFFFF;
+  for (int i = 0; i < len; i++) {
+    crc ^= buf[i];
+    for (int j = 0; j < 8; j++)
+      crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
+  }
+  return crc;
+}
+
+String formatTimestamp(time_t t) {
+  struct tm *tm = localtime(&t);
+  int h = tm->tm_hour % 12; if (h == 0) h = 12;
+  char buf[64];
+  sprintf(buf, "%d:%02d %s, %d-%02d-%d",
+          h, tm->tm_min,
+          tm->tm_hour >= 12 ? "pm" : "am",
+          tm->tm_mday, tm->tm_mon+1, 1900+tm->tm_year);
+  return String(buf);
+}
+
+// ── EC sensor read (slave 0x01) ──────────────────────────────
+bool readECSensor(float &ec, float &temp, float &sal, float &tds) {
+  while (RS485.available()) RS485.read();
+  delay(10);
+  digitalWrite(DE_RE, HIGH); delay(2);
+  RS485.write(ecRequest, sizeof(ecRequest));
+  RS485.flush();
+  digitalWrite(DE_RE, LOW);
+  delay(20);
+
+  int index = 0;
+  unsigned long start = millis();
+  while (millis() - start < 500 && index < 13)
+    if (RS485.available()) ecResponse[index++] = RS485.read();
+
+  if (index >= 13 && ecResponse[0] == 0x01 && ecResponse[1] == 0x03) {
+    ec   = ((ecResponse[3] << 8) | ecResponse[4]) / 10.0f;
+    temp = ((ecResponse[5] << 8) | ecResponse[6]) / 10.0f;
+    sal  = (float)((ecResponse[7] << 8) | ecResponse[8]);
+    tds  = (float)((ecResponse[9] << 8) | ecResponse[10]);
+    return true;
+  }
+  return false;
+}
+
+// ── DO sensor read (slave 0x02) ──────────────────────────────
+bool readDOSensor(float &doSat, float &doMg, float &doTemp) {
+  while (RS485.available()) RS485.read();
+  digitalWrite(DE_RE, HIGH); delay(2);
+  RS485.write(doRequest, sizeof(doRequest));
+  RS485.flush();
+  digitalWrite(DE_RE, LOW);
+
+  int index = 0;
+  unsigned long start = millis();
+  while (millis() - start < 500 && index < 17)
+    if (RS485.available()) doResponse[index++] = RS485.read();
+
+    // ← ADD THIS BLOCK temporarily
+  Serial.printf("[DO DEBUG] got %d bytes: ", index);
+  for (int i = 0; i < index; i++) Serial.printf("%02X ", doResponse[i]);
+  Serial.println();
+  // ← END DEBUG
+
+  if (index >= 17 && doResponse[0] == 0x02 && doResponse[1] == 0x03) {
+    doSat  = bytesToFloat(&doResponse[3]);
+    doMg   = bytesToFloat(&doResponse[7]);
+    doTemp = bytesToFloat(&doResponse[11]);
+    return true;
+  }
+  return false;
+}
+
+// ── Write single 16-bit register to DO sensor ────────────────
+bool writeDORegister(uint16_t reg, uint16_t val) {
+  uint8_t frame[8];
+  frame[0] = 0x02;           // slave addr
+  frame[1] = 0x06;           // FC06
+  frame[2] = reg >> 8;
+  frame[3] = reg & 0xFF;
+  frame[4] = val >> 8;
+  frame[5] = val & 0xFF;
+  uint16_t c = crc16(frame, 6);
+  frame[6] = c & 0xFF;
+  frame[7] = c >> 8;
+
+  while (RS485.available()) RS485.read();
+  digitalWrite(DE_RE, HIGH); delay(2);
+  RS485.write(frame, 8);
+  RS485.flush();
+  digitalWrite(DE_RE, LOW);
+
+  int index = 0;
+  unsigned long start = millis();
+  while (millis() - start < 500 && index < 8)
+    if (RS485.available()) { RS485.read(); index++; }
+  return (index == 8);
+}
+
+// ── Write atmospheric pressure and salinity to DO sensor ─────
+void writeDOAtmPressure() {
+  // 1004 hPa = 100.4 kPa; register stores kPa × 100 = 10040
+  uint16_t pressVal = (uint16_t)(ATM_PRESSURE_HPA * 10.0f);
+  if (writeDORegister(0x1022, pressVal))
+    Serial.printf("[DO] Atm pressure set: %.1f hPa (reg=%d)\n", ATM_PRESSURE_HPA, pressVal);
+  else
+    Serial.println("[DO] Atm pressure write failed");
+}
+
+void writeDOSalinity(float sal_ppm) {
+  // EC salinity is in ppm; DO register expects ‰ (ppt)
+  // ppm / 1000 = ppt, but register stores integer ‰
+  // For freshwater (< 1 ppt) this will be 0, which is fine
+  uint16_t salVal = (uint16_t)(sal_ppm / 1000.0f);
+  writeDORegister(0x1020, salVal);
+  // No serial print here — called every 2 min, keep output clean
+}
+
+// ============================================================
+//  SETUP
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+  delay(800);
+
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms     = WDT_TIMEOUT_SECONDS * 1000,
+    .idle_core_mask = (1 << 0),
+    .trigger_panic  = true
+  };
+  esp_task_wdt_init(&wdt_config);
+  esp_task_wdt_add(NULL);
+
+  RS485.begin(4800, SERIAL_8N1, RXD2, TXD2);
+  pinMode(DE_RE, OUTPUT);
+  digitalWrite(DE_RE, LOW);
+
+  Serial.println("\n==============================================");
+  Serial.println("  Sensor logger — pH + EC + DO");
+  Serial.printf("  pH cal: pH%.1f=%.0fmV | pH%.1f=%.0fmV\n",
+                CAL_pH_1, CAL_mV_1, CAL_pH_2, CAL_mV_2);
+  Serial.printf("  Sample: %ds × %d = %ds window\n",
+                (int)(SAMPLE_INTERVAL/1000), NUM_SAMPLES,
+                (int)(SAMPLE_INTERVAL/1000) * NUM_SAMPLES);
+  Serial.printf("  EC/DO median: last %d of %d samples\n", STABLE_COUNT, NUM_SAMPLES);
+  Serial.println("==============================================\n");
+
+  // Calibration mV adjustment to 25°C
+  float T_cal = CAL_TEMP_C + 273.15f;
+  float T_ref = REF_TEMP_C + 273.15f;
+  adjMv1 = CAL_mV_2 + (CAL_mV_1 - CAL_mV_2) * (T_ref / T_cal);
+  adjMv2 = CAL_mV_2 + (CAL_mV_2 - CAL_mV_2) * (T_ref / T_cal);  // = CAL_mV_2
+  Serial.printf("  Cal temp: %.1f C → adjMv1=%.1f adjMv2=%.1f\n\n",
+                CAL_TEMP_C, adjMv1, adjMv2);
+
+  // Write atmospheric pressure to DO sensor at boot
+  delay(500);
+  writeDOAtmPressure();
+  esp_task_wdt_reset();
+
+  // WiFi
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(1000);
+  scanNetworks();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.println("[WiFi] Connection attempt started");
+  Serial.println("[WiFi] Sampling begins immediately\n");
+}
+
+// ============================================================
+//  LOOP
+// ============================================================
+void loop() {
+  esp_task_wdt_reset();
+  manageNetwork();
+  unsigned long nowMs = millis();
+
+  // ── 5-second sample ───────────────────────────────────────
+  if (nowMs - lastSample >= SAMPLE_INTERVAL) {
+    lastSample = nowMs;
+
+    // 1) EC sensor
+    float ec = 0, ecTemp = REF_TEMP_C, sal = 0, tds = 0;
+    bool ecOk = readECSensor(ec, ecTemp, sal, tds);
+    if (!ecOk) ecTemp = (sampleIndex > 0) ? ecTempSamples[sampleIndex-1] : REF_TEMP_C;
+
+    delay(20);
+    // 2) DO sensor
+    float doSat = 0, doMg = 0, doTemp = 0;
+    bool doOk = readDOSensor(doSat, doMg, doTemp);
+    esp_task_wdt_reset();
+
+    // 3) pH (uses EC temp for compensation)
+    float mV    = analogRead(PH_PIN) * (3300.0f / 4095.0f);
+    float phRaw = computeRawPH(mV);
+    float phCor = temperatureCorrectPH(phRaw, ecTemp);
+
+    // Store samples
+    mvSamples[sampleIndex]     = mV;
+    phRawSamples[sampleIndex]  = phRaw;
+    phCorSamples[sampleIndex]  = phCor;
+    ecSamples[sampleIndex]     = ecOk ? ec    : (sampleIndex > 0 ? ecSamples[sampleIndex-1]    : 0);
+    ecTempSamples[sampleIndex] = ecTemp;
+    salSamples[sampleIndex]    = ecOk ? sal   : (sampleIndex > 0 ? salSamples[sampleIndex-1]   : 0);
+    tdsSamples[sampleIndex]    = ecOk ? tds   : (sampleIndex > 0 ? tdsSamples[sampleIndex-1]   : 0);
+    doSatSamples[sampleIndex]  = doOk ? doSat : (sampleIndex > 0 ? doSatSamples[sampleIndex-1] : 0);
+    doMgSamples[sampleIndex]   = doOk ? doMg  : (sampleIndex > 0 ? doMgSamples[sampleIndex-1]  : 0);
+    doTempSamples[sampleIndex] = doOk ? doTemp: (sampleIndex > 0 ? doTempSamples[sampleIndex-1]: REF_TEMP_C);
+
+    const char* wifiTag = (WiFi.status() == WL_CONNECTED) ? "WiFi:OK" : "WiFi:--";
+
+    // Serial Monitor — every 5s, all values
+    Serial.printf("[%02d/%d] pH: %.2f | pH(cor): %.2f | EC: %.1f uS/cm | Temp(EC): %.1f C | Sal: %.0f ppm | TDS: %.0f ppm | DO: %.1f%% / %.2f mg/L | Temp(DO): %.1f C | %s\n",
+      sampleIndex + 1, NUM_SAMPLES,
+      phRaw, phCor,
+      ecOk ? ec    : 0.0f, ecTemp,
+      ecOk ? sal   : 0.0f,
+      ecOk ? tds   : 0.0f,
+      doOk ? doSat : 0.0f,
+      doOk ? doMg  : 0.0f,
+      doOk ? doTemp: 0.0f,
+      wifiTag);
+
+    sampleIndex++;
+  }
+
+  // ── 60-second aggregation (after 12 samples) ──────────────
+  if (sampleIndex == NUM_SAMPLES) {
+    sampleIndex = 0;
+
+    // pH — median of all 12
+    float medPhRaw  = median(phRawSamples, NUM_SAMPLES);
+    float medPhCor  = median(phCorSamples, NUM_SAMPLES);
+    float medMv     = median(mvSamples,    NUM_SAMPLES);
+
+    // EC/DO — median of last 5 (more stable, sensor settled)
+    float medEC     = median(ecSamples     + STABLE_START, STABLE_COUNT);
+    float medECTemp = median(ecTempSamples + STABLE_START, STABLE_COUNT);
+    float medSal    = median(salSamples    + STABLE_START, STABLE_COUNT);
+    float medTDS    = median(tdsSamples    + STABLE_START, STABLE_COUNT);
+    float medDoSat  = median(doSatSamples  + STABLE_START, STABLE_COUNT);
+    float medDoMg   = median(doMgSamples   + STABLE_START, STABLE_COUNT);
+    float medDoTemp = median(doTempSamples + STABLE_START, STABLE_COUNT);
+
+    bool ecValid = (medEC   > 0.0f);
+    bool doValid = (medDoMg > 0.0f);
+
+    // Update DO sensor salinity from EC reading
+    if (ecValid) writeDOSalinity(medSal);
+    esp_task_wdt_reset();
+
+    Serial.println("────────────────────────────────────────────────────────────────────");
+    Serial.printf("[MEDIAN-12] pH: %.2f | pH(cor): %.2f\n", medPhRaw, medPhCor);
+    Serial.printf("  EC:  %.1f uS/cm | Temp(EC): %.1f C | Sal: %.0f ppm | TDS: %.0f ppm  [last 5]\n",
+                  medEC, medECTemp, medSal, medTDS);
+    Serial.printf("  DO:  %.1f%% sat | %.2f mg/L | Temp(DO): %.1f C  [last 5]\n",
+                  medDoSat, medDoMg, medDoTemp);
+    Serial.printf("  WiFi: %s | buf=%d\n",
+                  (WiFi.status() == WL_CONNECTED) ? "OK" : "--", bufferCount + 1);
+    Serial.println("────────────────────────────────────────────────────────────────────");
+    Serial.println();
+
+    DataPoint dp;
+    dp.epoch   = timeSynced ? time(nullptr) : (time_t)(nowMs / 1000);
+    dp.phRaw   = medPhRaw;  dp.phCor  = medPhCor;  dp.mv     = medMv;
+    dp.ec      = medEC;     dp.ecTemp = medECTemp;  dp.sal    = medSal;
+    dp.tds     = medTDS;    dp.ecValid = ecValid;
+    dp.doSat   = medDoSat;  dp.doMg   = medDoMg;   dp.doTemp = medDoTemp;
+    dp.doValid = doValid;
+
+    buffer[(bufferStart + bufferCount) % BUFFER_SIZE] = dp;
+    if (bufferCount < BUFFER_SIZE) bufferCount++;
+    else bufferStart = (bufferStart + 1) % BUFFER_SIZE;
+  }
+
+  // ── Firebase upload ───────────────────────────────────────
+  if (bufferCount > 0 && WiFi.status() == WL_CONNECTED && firebaseOk && Firebase.ready()) {
+    esp_task_wdt_reset();
+
+    DataPoint &dp = buffer[bufferStart];
+    String ts = timeSynced ? formatTimestamp(dp.epoch)
+                           : String("uptime+") + String(dp.epoch) + "s";
+
+    FirebaseJson jPH;
+    jPH.set("timestamp",    ts);
+    jPH.set("ph_raw",       dp.phRaw);
+    jPH.set("ph_corrected", dp.phCor);
+    jPH.set("mv",           dp.mv);
+
+    FirebaseJson jEC;
+    jEC.set("timestamp", ts);
+    jEC.set("ec",        dp.ec);
+    jEC.set("temp",      dp.ecTemp);
+    jEC.set("sal",       dp.sal);
+    jEC.set("tds",       dp.tds);
+    jEC.set("valid",     dp.ecValid);
+
+    FirebaseJson jDO;
+    jDO.set("timestamp",  ts);
+    jDO.set("do_sat_pct", dp.doSat);
+    jDO.set("do_mg_L",    dp.doMg);
+    jDO.set("temp",       dp.doTemp);
+    jDO.set("valid",      dp.doValid);
+
+    bool phOk = Firebase.RTDB.pushJSON(&fbdo, "/sensorData/ph_sensor", &jPH);
+    esp_task_wdt_reset(); delay(50);
+    bool ecOk = Firebase.RTDB.pushJSON(&fbdo, "/sensorData/ec_sensor",  &jEC);
+    esp_task_wdt_reset(); delay(50);
+    bool doOk = Firebase.RTDB.pushJSON(&fbdo, "/sensorData/do_sensor",  &jDO);
+    esp_task_wdt_reset();
+
+    if (phOk && ecOk && doOk) {
+      Serial.printf("[UPLOAD OK] %s | pH=%.2f | EC=%.1f | DO=%.2f mg/L | buf=%d\n",
+                    ts.c_str(), dp.phCor, dp.ec, dp.doMg, bufferCount - 1);
+      bufferStart = (bufferStart + 1) % BUFFER_SIZE;
+      bufferCount--;
+    } else {
+      Serial.printf("[UPLOAD FAIL] pH=%d EC=%d DO=%d → retry. %s\n",
+                    phOk, ecOk, doOk, fbdo.errorReason().c_str());
+    }
+  }
+}
