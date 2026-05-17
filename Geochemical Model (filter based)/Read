@@ -1,0 +1,158 @@
+Weathering Model - 						Wastewater Alkalinity Enhancement (WAE)
+Section 1: Inputs	1
+Section 2: Constants Carbonate Speciation:	1
+Section 3: Carbonate Speciation - Input:	2
+Section 4: Charge Balance	2
+Section 5: Required Carbon Removal	2
+Section 6: Limestone Weathering Reactions:	3
+Section 7: Model explanation:	3
+Section 8: Limestone Weathering:	4
+Section 9: Limestone Weathering Constants:	4
+Section 10: Weathering Computation:	5
+Section 11: Tonnes of CO2 equivalents removed per day:	6
+Section 12: Output Effluent Characteristics:	6
+References:	8
+
+
+Section 1: Inputs
+pH_in = 6.5    =>   H+=10−6.5
+
+Plant Capacity = 100 MLD=108 L/day=1.1574103 L/s
+
+pCO2 in the influent (assumed basis Cao et al., 2024) = 15,000 matm=15,000 ppm
+[CO2w]=15,00010−622.41=6.6910−4 mol/L
+Temperature:  T = 298.15 K
+
+Section 2: Constants Carbonate Speciation:
+Based on Stumm and Morgan (1996), at T,
+H2O + CO2  K1       H+ +HCO3-       =>   pK1=6.35      =>     K1=10−6.35 mol/L 
+HCO3−   →K2     H+ +  CO32-  =>  pK2=10.33    => K2=10−10.33 mol/L
+Water Dissociation:
+H2O →Kw  H+ + OH-    =>     pKw=14     =>    Kw=10−14 mol2/L2
+[OH-] = Kw[H+]
+
+Section 3: Carbonate Speciation - Input:
+[CO2w]in=6.6910−4 mol/L
+From the first reaction:
+[HCO3−]in=K1 *  [CO2w]H+=10−6.35(6.6910−4)10−6.5=9.5510−4 mol/L
+From the second reaction:
+[CO32−]in=K1 * K2 * [CO2w]H+2=10−6.35(10−10.33)(6.6910−4)(10−6.5)2=1.4210−7 mol/L
+
+Section 4: Charge Balance
+Let's for now assume that the system has no other anions except HCO3−,CO32−, OH−
+So other negative ions (An), such as sulphates, nitrates, etc.  are taken as zero, [An-] = 0
+As a conservative assumption for Calcium Carbonate saturation, lets assume all anions are being met by Calcium ions for charge balancing,
+2[Ca2+]in=[HCO3−]in+2[CO32−]in+[OH−]in+ [An-]−[H+]in = 4.78 10−4 mol/L  
+
+Section 5: Required Carbon Removal
+Let's target the system to remove a said percentage of the CO2w in the system. Let's take 50%
+[CO2w]removed = [CO2w]in * 50100 = 3.35 * 10-4 mol/L
+[CO2w]eff =[CO2w]in - [CO2w]removed = 3.35 * 10-4 mol/L 
+Section 6: Limestone Weathering Reactions:
+CaCO3 + H2O + CO2   Ca2++ 2 HCO3- 
+Bicarbonate formation thus leads to the removal of 1 CO2w from the water.
+In high pH or low moisture conditions, an additional reaction might occur, in this case, there is no net CO2w removal since 1 CO2 gets released back. 
+Ca2++2HCO3-    CaCO3 + CO2 + H2O
+
+Section 7: Model explanation:
+Let’s assess a system where due to calcite (limestone) weathering there is alkalinity being released into the wastewater. 
+Let’s take the system to be a porous medium of calcite rocks of uniform initial diameter through which the wastewater passes. (Imagine a rock bed filter)
+When the wastewater comes in contact with the calcite, there is weathering,  releasing alkalinity. Once released, this alkalinity mixes with and flows into the outflowing wastewater (effluent) constantly.
+Due to large particles, only the surface area comes in contact with the wastewater. So only a portion of its content reacts with CO2w - this reaction leads to rock weathering and consumption of the mineral.
+Weathering of the rock leads to a reduction in particle size. With reducing size, this surface area per mass increases,  increasing the weathering reaction rate per unit mass.
+We also need to add a certain mass constantly to compensate for the minerals consumed in the system. This ensures that there is sufficient capacity for alkalinity release into incoming fresh wastewater. 
+This newly added mass has particles of a diameter equal to the original diameter of the input particles.
+For now, let’s conservatively assume that the average particle size of the calcite rock does not reduce in size with time. This lets us calculate the maximum rock we need of a certain size to leach off sufficient alkalinity
+This leached-off alkalinity is used to convert CO2w into stable bicarbonates.
+Since there are no other anions like SO42- and NO32- we will not consider strong acid loss. In the case where [An-] > 0, these strong acids will preferentially attack CaCO3, leading to release of CO2
+CaCO3+SO42-    CaSO4 + CO2 + H2O
+
+Section 8: Limestone Weathering:
+Empirical weathering rate equations Palandiri and Kharaka, 2004, adapted by Bertagni et al., 2025:
+Weathering is a combination of dissolution due to H+, H2O, and OH– with dissolution factors: Kacid,Kneutral,Kbase.
+Wr = SA * [ kacid * exp(-Eacid* (1T - 1298.15)) * ([H+])nH 
+		+ kneutral * exp(-Eneutral* (1T - 1298.15)) 
+		+ kbase * exp(-Ebase* (1T - 1298.15)) * ([H+])nOH] * (1 -)  
+
+Section 9: Limestone Weathering Constants:
+Constants for limestone weathering:
+kacid=5.0110−1 mol/m2/s
+kbase=3.3110−4 mol/m2/s
+kneutral=1.5510−6 mol/m2/s
+Activation energies:
+EH+=14.4 kJ/mol
+EOH−=35.4 kJ/mol
+EH2O=23.5 kJ/mol
+
+nH= 1
+nOH= 1
+=[Ca2+] * [CO32−]Ksp,  CaCO3 
+Ksp, CaCO3 = 4.47 * 10-9 mol2/L2
+SA = Surface Area
+Beerling et al., 2020 define surface area for rocks based on rock surface fractality. This surface area is much larger than the outer surface area due to cracks.
+SSA = 6 * a * db d * rho m2/g
+SA =( SSA * Mlimestone )  m2,  where Mrock is in grams
+b = 0.35
+a = (12 * 10-10) * b
+Let's assume din = 0.01 m , as initial size of limestone rocks
+rho = 2.71 g/cm3, for Limestone
+
+Using these equations,
+ SSA = 0.1096 m2/g
+
+Section 10: Weathering Computation:
+in=[Ca2+]in * [CO32−]inKsp,  CaCO3 = 1.52 * 10-2 
+
+Using limestone, weathering equation from section 7,
+Wrper gram of limestone = 1.68 * 10-6 mol/m2/s 
+
+We know the moles of CO2w required to be utilised/removed from the system, so we know the amount of alkalinity addition to the system required. We can use that to calculate the mass of limestone required at any point in time in the system. Where, 
+
+Mlimestone = [CO2w]removed Wrper gram of limestone grams  =  [CO2w]removed Wrper gram of limestone*10-6 tonnes of Limestone
+
+Mlimestone = 2.41 tons of limestone
+
+At any point in the day, 2.41 tons of 0.01m particles are required in the filter system at any point to weather enough alkalinity to remove the 50% amount of CO2w.
+
+Note: The current estimate assumes that there is no change in saturation during the release of alkalinity. This can be assumed fairly since for a 100 MLD plant, flow rates are 104 times higher in magnitude than weathering rates.
+
+Section 11: Tonnes of CO2 equivalents removed per day:
+Basis CO2w removal,
+
+Carbon Credits (tCO2eq./day) = [CO2w]removed (mol/L)* Flow(L/s)*86400 (s/day) * 44(g/mol) * 10-6(t/g)
+
+Carbon Credits  = 1.47  tCO2e/day 
+
+Limestone consumed = Carbon Credits *100/44    = 3.35 tons/day
+(since stoichiometrically equivalent moles of CaCO3 must get consumed to remove CO2w)
+
+Section 12: Output Effluent Characteristics:
+[CO2w]eff =3.35 * 10-4 mol/L  , 
+Now based on reaction chemistry and stoichiometry in section 6, 
+[Ca]eff =[Ca]in + [CO2w]removed = 8.12*10-4 mol/L 
+To understand the split between the amount of HCO3- and CO32- formed, let's consider a parameter f where f denotes the fraction of CO2w converting to HCO3-  and (1-f) forms CO32-. Here f belongs between 0 and 1:
+ [HCO3-]formed =[CO2w]removed* f  *2
+ [CO32-]formed =[CO2w]removed*(1- f) 
+To derive the correct value of f, we can verify the pH from both of these concentrations since we know the final CO2w concentrations, using equations from section 3, we can assess the [H+ ] we get from each. 
+[H+]check1 = [CO2w]eff * k1[HCO3-]
+[H+]check2 = [CO2w]eff * k1* k2[CO32-]
+We solve for f such that [H+]check1 = [H+]check2
+For this case f comes out to be = 0.998
+Knowing this we will be able to establish final concentrations of H+, HCO3-, and CO32-:
+[H+]eff  =9.3 * 10-8 mol/L 
+pHeff = 7.03
+[HCO3-]eff = 1.62 * 10-3 mol/L
+[CO32-]eff = 8.11 * 10-7 mol/L
+It is also important to note the CaCO3 saturation of the effluent so as to minimise reprecipitation and waste of limestone. We need to ensure it is less than 1. 
+eff=[Ca2+]eff * [CO32−]effKsp,  CaCO3 =0.88 
+
+References:
+Beerling, D.J., Kantzas, E.P., Lomas, M.R., Wade, P., Eufrasio, R.M., Renforth, P., Sarkar, B., Andrews, M.G., James, R.H., Pearce, C.R. and Mercure, J.F., 2020. Potential for large-scale CO2 removal via enhanced rock weathering with croplands. Nature, 583(7815), pp.242-248.
+
+Bertagni, M. B., Calabrese, S., Cipolla, G., Noto, L. V., & Porporato, A. (2025). Advancing enhanced weathering modeling in soils: Critical comparison with experimental data. Journal of Advances in Modeling Earth Systems, 17(1), e2024MS004224.
+
+Cao, X., Xu, Y. J., Long, G., Wu, P., & Liu, Z. (2024). Dissolved carbon in effluent of wastewater treatment plants and its potential impacts in the receiving karst river. Environmental Research, 251, 118570.
+
+Palandri, J. L., & Kharaka, Y. K. (2004). A compilation of rate parameters of water-mineral interaction kinetics for application to geochemical modeling (No. 2004-1068). US Geological Survey.
+
+Stumm, W., Morgan, J. J., & Drever, J. I. (1996). Aquatic chemistry. Journal of environmental quality, 25(5), 1162.
